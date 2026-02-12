@@ -28,6 +28,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.0",
     "nodemailer": "^8.0.1",
+    "socket.io": "^4.8.3",
     "xss-clean": "^0.1.4"
   },
   "devDependencies": {

@@ -5,7 +5,7 @@ const MoodLog = require('../models/MoodLog');
 const AppreciationLog = require('../models/AppreciationLog');
 const Memory = require('../models/Memory');
 const Notification = require('../models/Notification');
-const logger = require('../utils/logger'); // Central Logger
+const logger = require('../utils/logger');
 
 // Helper: Get formatted date string YYYY-MM-DD
 const getDatestamp = (date) => date.toISOString().split('T')[0];
@@ -14,14 +14,22 @@ const getDatestamp = (date) => date.toISOString().split('T')[0];
 const getMonday = (d) => {
   const date = new Date(d);
   const day = date.getDay();
-  const diff = date.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+  const diff = date.getDate() - day + (day === 0 ? -6 : 1);
   return new Date(date.setDate(diff));
 };
 
 const runInsightEngine = async () => {
-  logger.info('[InsightEngine] Starting Daily Analysis Cycle...');
-  
   const today = new Date();
+  
+  // 1. WEEKLY EXECUTION GUARD
+  // Only run on Monday (UTC Day 1)
+  if (today.getUTCDay() !== 1) {
+    logger.info('[InsightEngine] Skipped - Not weekly run day (Monday)');
+    return;
+  }
+
+  logger.info('[InsightEngine] Starting Weekly Analysis Cycle...');
+  
   const weekStartObj = getMonday(today);
   const weekStartStr = getDatestamp(weekStartObj);
   
@@ -33,17 +41,16 @@ const runInsightEngine = async () => {
   let insightCount = 0;
   let notificationCount = 0;
 
-  // 1. BATCH PROCESSING: Streaming Cursor
+  // 2. BATCH PROCESSING: Streaming Cursor
+  // Efficiently streams couples without loading all into memory
   const cursor = Couple.find({ status: 'Active' }).cursor();
 
-  // Sequential processing (No Promise.all on full dataset)
   for (let couple = await cursor.next(); couple != null; couple = await cursor.next()) {
     try {
       processedCount++;
 
-      // 2. IDEMPOTENCY CHECK
-      // If we already generated an insight for this week (starting Monday), SKIP.
-      // This ensures the heavy logic runs exactly once per week per couple.
+      // 3. IDEMPOTENCY CHECK
+      // If insight already exists for this week, skip.
       const exists = await WeeklyInsight.exists({ 
         coupleId: couple._id, 
         weekStart: weekStartStr 
@@ -51,14 +58,31 @@ const runInsightEngine = async () => {
 
       if (exists) continue;
 
-      // 3. AGGREGATION (Last 7 Days)
-      // We run these in parallel for the *single* couple (low memory footprint)
-      const [moods, appreciations, memories, fightCount] = await Promise.all([
-        MoodLog.find({ coupleId: couple._id, date: { $gte: last7DaysStr } }).lean(),
-        AppreciationLog.find({ coupleId: couple._id, date: { $gte: last7DaysStr } }).lean(),
-        Memory.find({ coupleId: couple._id, date: { $gte: last7Days } }).lean(), // Memory uses Date obj
-        MoodLog.countDocuments({ coupleId: couple._id, mood: 'Fight', date: { $gte: last7DaysStr } })
-      ]);
+      // 4. SEQUENTIAL AGGREGATION (No Promise.all)
+      // Prevents DB connection spikes during batch processing.
+      // All queries rely on Index: { coupleId: 1, date: 1 } (or -1 for Memory)
+      
+      const moods = await MoodLog.find({ 
+        coupleId: couple._id, 
+        date: { $gte: last7DaysStr } 
+      }).lean();
+
+      const appreciations = await AppreciationLog.find({ 
+        coupleId: couple._id, 
+        date: { $gte: last7DaysStr } 
+      }).lean();
+
+      // Memory uses Date object for comparison
+      const memories = await Memory.find({ 
+        coupleId: couple._id, 
+        date: { $gte: last7Days } 
+      }).lean();
+
+      const fightCount = await MoodLog.countDocuments({ 
+        coupleId: couple._id, 
+        mood: 'Fight', 
+        date: { $gte: last7DaysStr } 
+      });
 
       // Calculate Metrics
       const totalMoodScore = moods.reduce((acc, log) => {
@@ -71,28 +95,26 @@ const runInsightEngine = async () => {
       
       const averageMood = moods.length > 0 ? (totalMoodScore / moods.length).toFixed(1) : 0;
 
-      // Interaction Days (Unique dates with activity)
+      // Interaction Days Calculation
       const activityDates = new Set();
       moods.forEach(m => activityDates.add(m.date));
       appreciations.forEach(a => activityDates.add(a.date));
       memories.forEach(m => activityDates.add(getDatestamp(m.date)));
       const interactionDays = activityDates.size;
 
-      // 4. RISK LOGIC (Production Rules)
+      // 5. RISK LOGIC
       let riskLevel = 'Low';
       let actionRequired = false;
 
-      // Rule: High Risk
       if (couple.score < 30 || fightCount >= 3 || interactionDays <= 2) {
         riskLevel = 'High';
         actionRequired = true;
       } 
-      // Rule: Medium Risk
       else if ((couple.score >= 30 && couple.score <= 50) || interactionDays <= 4) {
         riskLevel = 'Medium';
       }
 
-      // 5. CREATE INSIGHT
+      // 6. CREATE INSIGHT
       await WeeklyInsight.create({
         coupleId: couple._id,
         weekStart: weekStartStr,
@@ -102,25 +124,18 @@ const runInsightEngine = async () => {
         appreciationCount: appreciations.length,
         memoryCount: memories.length,
         fightCount,
-        scoreChange: 0, // Placeholder: Requires tracking previous week's score
+        scoreChange: 0, 
         riskLevel,
         actionRequired
       });
 
       insightCount++;
 
-      // 6. UPDATE COUPLE STATE
-      if (actionRequired) {
-        // We don't have a specific 'riskLevel' field in Couple Schema phase 2/3, 
-        // but typically we'd set a flag or just rely on notifications.
-        // For strict schema adherence, we only send notifications now.
-      }
-
       // 7. NOTIFICATION INTEGRATION (High Risk Only)
       if (riskLevel === 'High') {
         const todayStr = getDatestamp(today);
 
-        // Process for BOTH users
+        // Notify BOTH users
         for (const userId of couple.users) {
           // Check Daily Limit (Max 3)
           const dailyCount = await Notification.countDocuments({
@@ -143,11 +158,10 @@ const runInsightEngine = async () => {
 
     } catch (err) {
       logger.error(`[InsightEngine] Error processing couple ${couple._id}`, err);
-      // Continue to next couple
     }
   }
 
-  logger.info(`[InsightEngine] Cycle Complete. Processed: ${processedCount}, Created: ${insightCount}, Alerts: ${notificationCount}`);
+  logger.info(`[InsightEngine] Weekly Cycle Complete. Processed: ${processedCount}, Created: ${insightCount}, Alerts: ${notificationCount}`);
 };
 
 module.exports = { runInsightEngine };
