@@ -5,7 +5,6 @@ const { updateCoupleScore } = require('../utils/scoreEngine');
 
 // @desc    Get Recovery Status
 // @route   GET /api/couple/recovery
-// @access  Private
 exports.getRecoveryStatus = async (req, res) => {
   try {
     const user = await User.findById(req.user);
@@ -22,7 +21,6 @@ exports.getRecoveryStatus = async (req, res) => {
 
     const daysActive = Math.floor((Date.now() - new Date(couple.recoveryStartedAt)) / (1000 * 60 * 60 * 24));
 
-    // Dynamic Suggestions based on Level
     let suggestions = [];
     if (couple.recoveryLevel === 'Soft') {
       suggestions = ['Send a gentle appreciation', 'Share a happy memory'];
@@ -48,35 +46,38 @@ exports.getRecoveryStatus = async (req, res) => {
 
 // @desc    Submit Recovery Action
 // @route   POST /api/couple/recovery-action
-// @access  Private
 exports.submitRecoveryAction = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      const { type } = req.body; // e.g., 'Appreciation', 'Reflection', 'Apology'
+      const { type } = req.body; 
       const user = await User.findById(req.user).session(session);
       
       if (!user.coupleId) throw new Error('No relationship found');
       
+      // 1. Verify Mode
+      // We fetch without session first to check if update is needed, 
+      // but strictly we should fetch inside session for consistency.
       const couple = await Couple.findById(user.coupleId).session(session);
 
       if (!couple.recoveryMode) {
         throw new Error('Couple is not in recovery mode');
       }
 
-      // 1. Log Action (Optional: Could store in a RecoveryLog model later)
-      // For now, we trust the action and award points.
-
       // 2. Award Score (+2 Bonus)
       await updateCoupleScore(user.coupleId, 2, session);
 
-      // 3. Immediate Exit Check (Gamification)
-      // If this action pushed score > 50, exit immediately
-      if (couple.score + 2 > 50) {
-        couple.recoveryMode = false;
-        couple.recoveryStartedAt = undefined;
-        couple.recoveryLevel = undefined;
-        await couple.save({ session });
+      // 3. GUARDIAN FIX: Refetch Updated State
+      // updateCoupleScore modified the doc, so we must fetch the FRESH version 
+      // to check if we crossed the threshold.
+      const updatedCouple = await Couple.findById(user.coupleId).session(session);
+
+      // 4. Immediate Exit Check (Gamification)
+      if (updatedCouple.score > 50) {
+        updatedCouple.recoveryMode = false;
+        updatedCouple.recoveryStartedAt = undefined;
+        updatedCouple.recoveryLevel = undefined;
+        await updatedCouple.save({ session });
       }
     });
 

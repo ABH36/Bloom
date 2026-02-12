@@ -9,7 +9,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['StreakWarning', 'HighRisk', 'WeeklyReport', 'PartnerAction'],
+    enum: ['StreakWarning', 'HighRisk', 'WeeklyReport', 'PartnerAction', 'RecoveryStart'],
     required: true
   },
   priority: {

@@ -24,12 +24,15 @@ const journalRoutes = require('./routes/journalRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const matchingRoutes = require('./routes/matchingRoutes');
 const recoveryRoutes = require('./routes/recoveryRoutes');
+const { connectCloudinary } = require('./config/cloudinary'); // Import Config
+const uploadRoutes = require('./routes/uploadRoutes');
 
 // --- 1. VALIDATE ENVIRONMENT (Fail Fast) ---
 validateEnv();
 
 // --- 2. CONNECT DATABASE ---
 connectDB();
+connectCloudinary();
 
 const app = express();
 
@@ -68,6 +71,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/couple', coupleRoutes);
 app.use('/api/love', interactionRoutes);
+app.use('/api/upload', uploadRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/memory', memoryRoutes);
 app.use('/api/journal', journalRoutes);
