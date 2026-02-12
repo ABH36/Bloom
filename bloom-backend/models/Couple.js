@@ -7,7 +7,6 @@ const coupleSchema = new mongoose.Schema({
     required: true,
     validate: {
       validator: function(val) {
-        // Must be exactly 2 distinct users
         return val.length === 2 && val[0].toString() !== val[1].toString();
       },
       message: 'A couple must consist of exactly 2 distinct users'
@@ -21,13 +20,32 @@ const coupleSchema = new mongoose.Schema({
   startDate: {
     type: Date,
     default: Date.now
+  },
+  
+  // --- PHASE 3 FIELDS (Love Tree Engine) ---
+  score: {
+    type: Number,
+    default: 50,
+    min: 0,
+    max: 100
+  },
+  stage: {
+    type: String,
+    enum: ['Dry', 'Weak', 'Growing', 'Healthy', 'Bloom'],
+    default: 'Growing'
+  },
+  streak: {
+    type: Number,
+    default: 0
+  },
+  lastInteractionDate: {
+    type: Date
   }
 }, {
   timestamps: true
 });
 
-// CRITICAL SECURITY: Prevent multiple active couples for the same pair
-// This enforces that a specific pair of users can only have ONE 'Active' couple document.
+// Indexes
 coupleSchema.index(
   { users: 1, status: 1 }, 
   { unique: true, partialFilterExpression: { status: 'Active' } }

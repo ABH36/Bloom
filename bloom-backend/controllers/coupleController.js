@@ -3,9 +3,14 @@ const crypto = require('crypto');
 const User = require('../models/User');
 const Couple = require('../models/Couple');
 
-// Helper: Generate 8-char Uppercase ID
+// Helper: Generate 8-char Alphanumeric (Base36)
 const generateCode = () => {
-  return crypto.randomBytes(4).toString('hex').toUpperCase();
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let result = '';
+  for (let i = 0; i < 8; i++) {
+    result += chars.charAt(crypto.randomInt(0, chars.length));
+  }
+  return result;
 };
 
 // @desc    Generate Love ID
@@ -13,47 +18,43 @@ const generateCode = () => {
 // @access  Private
 exports.generateLoveId = async (req, res, next) => {
   try {
-    // 1. Check if already in a relationship
-    if (req.user.coupleId) {
+    const user = await User.findById(req.user);
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    if (user.coupleId) {
       return res.status(400).json({ success: false, error: 'You are already in a relationship.' });
     }
 
-    // 2. Check if ID already exists (Return existing)
-    if (req.user.loveId) {
+    if (user.loveId) {
       return res.status(200).json({ 
         success: true, 
-        loveId: req.user.loveId,
+        loveId: user.loveId,
         message: 'Existing Love ID retrieved' 
       });
     }
 
-    // 3. Generate Unique ID (Retry logic for collision)
     let loveId;
     let isUnique = false;
     let attempts = 0;
 
     while (!isUnique && attempts < 5) {
       loveId = generateCode();
-      // Check collision
       const existingUser = await User.findOne({ loveId });
-      if (!existingUser) {
-        isUnique = true;
-      }
+      if (!existingUser) isUnique = true;
       attempts++;
     }
 
     if (!isUnique) {
-      return res.status(500).json({ success: false, error: 'Could not generate unique ID. Try again.' });
+      return res.status(500).json({ success: false, error: 'System busy. Please try again.' });
     }
 
-    // 4. Save to User
-    req.user.loveId = loveId;
-    await req.user.save();
+    user.loveId = loveId;
+    await user.save();
 
-    res.status(201).json({
-      success: true,
-      loveId
-    });
+    res.status(201).json({ success: true, loveId });
 
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -65,82 +66,100 @@ exports.generateLoveId = async (req, res, next) => {
 // @access  Private
 exports.connectPartner = async (req, res, next) => {
   const session = await mongoose.startSession();
-  session.startTransaction();
-
+  
   try {
-    const { loveId } = req.body; // Partner's Love ID
+    let resultCoupleId;
 
-    if (!loveId) {
-      throw new Error('Please provide a Love ID');
-    }
+    // Use withTransaction for auto-retries on transient errors
+    await session.withTransaction(async () => {
+      const { loveId } = req.body;
 
-    // 1. Fetch Initiator (User A)
-    const userA = await User.findById(req.user._id).session(session);
+      if (!loveId) {
+        const error = new Error('Please provide a Love ID');
+        error.statusCode = 400;
+        throw error;
+      }
 
-    // 2. Fetch Partner (User B)
-    const userB = await User.findOne({ loveId }).session(session);
+      // 1. Fetch Users inside Session
+      const userA = await User.findById(req.user).session(session);
+      const userB = await User.findOne({ loveId: loveId.toUpperCase() }).session(session);
 
-    // --- STRICT VALIDATIONS INSIDE TRANSACTION ---
+      // --- STRICT VALIDATIONS ---
+      if (!userA) {
+        const error = new Error('User not found');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    // Check Existence
-    if (!userB) {
-      throw new Error('Invalid Love ID');
-    }
+      if (!userB) {
+        const error = new Error('Invalid Love ID');
+        error.statusCode = 404;
+        throw error;
+      }
 
-    // Check Self-Connection
-    if (userA._id.equals(userB._id)) {
-      throw new Error('You cannot connect with yourself');
-    }
+      if (userA._id.equals(userB._id)) {
+        const error = new Error('You cannot connect with yourself');
+        error.statusCode = 400;
+        throw error;
+      }
 
-    // Check User A Status
-    if (userA.coupleId) {
-      throw new Error('You are already in a relationship');
-    }
+      if (userA.coupleId) {
+        const error = new Error('You are already in a relationship');
+        error.statusCode = 400;
+        throw error;
+      }
 
-    // Check User B Status
-    if (userB.coupleId) {
-      throw new Error('This user is already taken');
-    }
+      if (userB.coupleId) {
+        const error = new Error('This user is already taken');
+        error.statusCode = 409; // Conflict
+        throw error;
+      }
 
-    // --- EXECUTION ---
+      // 2. Deterministic Sorting for Unique Index
+      // Convert to string -> Sort -> Convert back to ObjectId
+      const sortedUsers = [userA._id.toString(), userB._id.toString()]
+        .sort()
+        .map(id => new mongoose.Types.ObjectId(id));
 
-    // 3. Create Couple Document
-    const newCouple = await Couple.create([{
-      users: [userA._id, userB._id],
-      status: 'Active'
-    }], { session });
+      // 3. Create Couple (Array format required for transactions)
+      const newCouple = await Couple.create([{
+        users: sortedUsers,
+        status: 'Active',
+        startDate: Date.now()
+      }], { session });
 
-    const coupleId = newCouple[0]._id;
+      resultCoupleId = newCouple[0]._id;
 
-    // 4. Update User A (Initiator)
-    userA.coupleId = coupleId;
-    userA.loveId = undefined; // Burn Code
-    await userA.save({ session });
+      // 4. Update Users & Burn Codes
+      userA.coupleId = resultCoupleId;
+      userA.loveId = undefined;
+      await userA.save({ session });
 
-    // 5. Update User B (Partner)
-    userB.coupleId = coupleId;
-    userB.loveId = undefined; // Burn Code
-    await userB.save({ session });
+      userB.coupleId = resultCoupleId;
+      userB.loveId = undefined;
+      await userB.save({ session });
+    });
 
-    // 6. Commit Transaction
-    await session.commitTransaction();
-    session.endSession();
-
+    // Transaction Committed Automatically by withTransaction
     res.status(200).json({
       success: true,
       message: 'Couple connected successfully! ❤️',
-      coupleId
+      coupleId: resultCoupleId
     });
 
   } catch (error) {
-    // Abort on ANY error
-    await session.abortTransaction();
-    session.endSession();
-    
-    // Determine status code based on error type
-    const statusCode = error.message.includes('Invalid') || error.message.includes('taken') ? 400 : 500;
-    
+    // Handle Duplicate Key Error (Race Condition / Integrity)
+    if (error.code === 11000) {
+      return res.status(409).json({ 
+        success: false, 
+        error: 'Connection conflict. One of the users is already active in a couple.' 
+      });
+    }
+
+    const statusCode = error.statusCode || 500;
     res.status(statusCode).json({ success: false, error: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -149,36 +168,40 @@ exports.connectPartner = async (req, res, next) => {
 // @access  Private
 exports.getCoupleStatus = async (req, res, next) => {
   try {
-    // 1. Check if Single
-    if (!req.user.coupleId) {
+    const user = await User.findById(req.user);
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    if (!user.coupleId) {
       return res.status(200).json({
         status: 'Single',
-        loveId: req.user.loveId || null
+        loveId: user.loveId || null
       });
     }
 
-    // 2. Fetch Couple Data
-    const couple = await Couple.findById(req.user.coupleId).populate('users', 'name email city');
+    const couple = await Couple.findById(user.coupleId).populate('users', 'name email city');
 
     if (!couple) {
-      // Data Integrity Error (Edge Case: User has ID but Couple doc missing)
-      req.user.coupleId = null;
-      await req.user.save();
-      return res.status(200).json({ status: 'Single', message: 'Relationship data not found. Resetting status.' });
+      // Data Integrity Fallback
+      user.coupleId = null;
+      await user.save();
+      return res.status(200).json({ status: 'Single', message: 'Relationship data missing. Resetting.' });
     }
 
-    // 3. Identify Partner
-    const partner = couple.users.find(u => u._id.toString() !== req.user._id.toString());
+    // Identify Partner
+    const partner = couple.users.find(u => u._id.toString() !== user._id.toString());
 
     res.status(200).json({
       status: 'In Relationship',
+      coupleId: couple._id,
       startDate: couple.startDate,
-      partner: {
+      partner: partner ? {
         name: partner.name,
         email: partner.email,
         city: partner.city
-      },
-      coupleId: couple._id
+      } : null
     });
 
   } catch (error) {
