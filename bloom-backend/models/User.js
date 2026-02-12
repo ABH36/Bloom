@@ -39,11 +39,26 @@ const userSchema = new mongoose.Schema({
     required: [true, 'Please add city'],
     trim: true
   },
-  relationshipStatus: {
+  // --- PHASE 1 FIELDS END ---
+
+  // --- PHASE 2 FIELDS (Couple Engine) ---
+  loveId: {
     type: String,
-    enum: ['Single', 'In Relationship'],
-    default: 'Single'
+    unique: true, 
+    sparse: true, // Allows multiple null values
+    index: true,
+    uppercase: true,
+    trim: true,
+    minlength: 8,
+    maxlength: 8
   },
+  coupleId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Couple',
+    default: null,
+    index: true // Fast lookup for relationship status
+  },
+  
   isVerified: {
     type: Boolean,
     default: false
@@ -54,19 +69,25 @@ const userSchema = new mongoose.Schema({
     attempts: { type: Number, default: 0 }
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for Frontend Convenience (Not stored in DB)
+userSchema.virtual('relationshipStatus').get(function() {
+  return this.coupleId ? 'In Relationship' : 'Single';
 });
 
 // Encrypt password using bcrypt
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) {
-    return next(); // FIXED: added return
+    return next();
   }
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
 });
 
-// Match user entered password to hashed password in database
 userSchema.methods.matchPassword = async function(enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
