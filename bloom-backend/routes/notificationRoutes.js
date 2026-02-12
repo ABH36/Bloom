@@ -27,8 +27,15 @@ const actionLimiter = rateLimit({
 
 router.use(protect);
 
+// 1. GET Feed
 router.get('/', feedLimiter, getNotifications);
-router.patch('/:id/read', actionLimiter, markRead);
+
+// 2. STATIC ROUTES FIRST (Critical: Prevent ID Collision)
+// Marks all notifications as read
 router.patch('/read-all', actionLimiter, markAllRead);
+
+// 3. DYNAMIC ROUTES LAST
+// Marks a specific notification as read
+router.patch('/:id/read', actionLimiter, markRead);
 
 module.exports = router;
