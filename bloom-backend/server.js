@@ -22,6 +22,8 @@ const chatRoutes = require('./routes/chatRoutes');
 const memoryRoutes = require('./routes/memoryRoutes');
 const journalRoutes = require('./routes/journalRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const matchingRoutes = require('./routes/matchingRoutes');
+const recoveryRoutes = require('./routes/recoveryRoutes');
 
 // --- 1. VALIDATE ENVIRONMENT (Fail Fast) ---
 validateEnv();
@@ -70,7 +72,8 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/memory', memoryRoutes);
 app.use('/api/journal', journalRoutes);
 app.use('/api/notifications', notificationRoutes);
-
+app.use('/api/match', matchingRoutes);
+app.use('/api/couple/recovery', recoveryRoutes);
 // --- 8. CRON SCHEDULER (Intelligence Layer) ---
 // Runs Daily at 02:00 UTC
 // The Engine internally checks if it is Monday before running heavy analytics.

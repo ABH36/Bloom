@@ -34,22 +34,31 @@ exports.getSuggestions = async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'Not eligible for matching.' });
     }
 
-    const { city, gender } = user.matchPreferences;
+    // GUARDIAN FIX: Pagination
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50);
+    const skip = (page - 1) * limit;
+
+    const { city, gender, ageRange } = user.matchPreferences;
     
     // Construct Query
     const query = {
-      _id: { $ne: user._id }, // Not self
-      coupleId: null,         // Must be single
-      isDiscoverable: true,   // Must be opted-in
+      _id: { $ne: user._id },
+      coupleId: null,
+      isDiscoverable: true,
     };
 
     if (city) query['matchProfile.city'] = city;
     if (gender && gender !== 'Any') query['matchProfile.gender'] = gender;
 
-    // Simple Interest Overlap Logic (Can be enhanced with Aggregation later)
+    if (ageRange && ageRange.min && ageRange.max) {
+      query['matchProfile.age'] = { $gte: ageRange.min, $lte: ageRange.max };
+    }
+
     const suggestions = await User.find(query)
-      .select('name matchProfile.age matchProfile.city matchProfile.gender matchProfile.bio matchProfile.interests matchProfile.goal')
-      .limit(20)
+      .select('name avatar matchProfile.age matchProfile.city matchProfile.gender matchProfile.bio matchProfile.interests matchProfile.goal matchProfile.personalityType')
+      .skip(skip)
+      .limit(limit)
       .lean();
 
     res.status(200).json({ success: true, count: suggestions.length, data: suggestions });
@@ -65,8 +74,36 @@ exports.sendRequest = async (req, res, next) => {
     const { toUserId, message } = req.body;
     const fromUserId = req.user;
 
-    // 1. Check Reverse Request (Critical Guardian Rule)
-    // If B already requested A, don't create new request. Tell A to accept B.
+    if (toUserId === fromUserId.toString()) {
+       return res.status(400).json({ success: false, error: 'Cannot send request to yourself' });
+    }
+
+    // 1. Sender Eligibility Check
+    const fromUser = await User.findById(fromUserId);
+    if (!fromUser || fromUser.coupleId || !fromUser.isDiscoverable) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'You are not eligible for matching. Ensure you are single and discoverable.' 
+      });
+    }
+
+    // 2. GUARDIAN FIX: DB-Level Daily Limit Enforcer (20/Day)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const dailyCount = await MatchRequest.countDocuments({
+      fromUserId,
+      createdAt: { $gte: todayStart }
+    });
+
+    if (dailyCount >= 20) {
+      return res.status(429).json({
+        success: false,
+        error: 'Daily request limit reached (20/day). Please try again tomorrow.'
+      });
+    }
+
+    // 3. Reverse Request Check
     const reverseRequest = await MatchRequest.findOne({
       fromUserId: toUserId,
       toUserId: fromUserId,
@@ -80,13 +117,13 @@ exports.sendRequest = async (req, res, next) => {
       });
     }
 
-    // 2. Validate Target User
+    // 4. Validate Target User
     const targetUser = await User.findById(toUserId);
     if (!targetUser || targetUser.coupleId || !targetUser.isDiscoverable) {
       return res.status(404).json({ success: false, error: 'User unavailable for matching.' });
     }
 
-    // 3. Create Request
+    // 5. Create Request
     await MatchRequest.create({
       fromUserId,
       toUserId,
@@ -110,8 +147,13 @@ exports.respondRequest = async (req, res, next) => {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      const { requestId, action } = req.body; // action: 'Accepted' | 'Rejected'
+      const { requestId, action } = req.body; 
       const userId = req.user;
+
+      // GUARDIAN FIX: Validate Action
+      if (!['Accepted', 'Rejected'].includes(action)) {
+        throw new Error('Invalid action. Must be Accepted or Rejected.');
+      }
 
       const request = await MatchRequest.findById(requestId).session(session);
       if (!request || request.status !== 'Pending') {
@@ -128,9 +170,7 @@ exports.respondRequest = async (req, res, next) => {
         return; 
       }
 
-      // --- ACCEPT FLOW (Couple Creation) ---
-      
-      // 1. Verify both are STILL single (Race condition check)
+      // --- ACCEPT FLOW ---
       const userA = await User.findById(request.fromUserId).session(session);
       const userB = await User.findById(request.toUserId).session(session);
 
@@ -138,18 +178,20 @@ exports.respondRequest = async (req, res, next) => {
         throw new Error('One of the users is no longer single.');
       }
 
-      // 2. Create Couple
+      const sortedUsers = [userA._id, userB._id].sort((a, b) => 
+        a.toString().localeCompare(b.toString())
+      );
+
       const newCouple = await Couple.create([{
-        users: [userA._id, userB._id],
+        users: sortedUsers,
         status: 'Active',
         startDate: Date.now(),
-        score: 50 // Initial Score
+        score: 50
       }], { session });
 
-      // 3. Update Users (Exit Matching Pool)
       userA.coupleId = newCouple[0]._id;
-      userA.isDiscoverable = false; // Auto-hide
-      userA.matchProfile = undefined; // Optional: Clear profile or keep hidden
+      userA.isDiscoverable = false;
+      userA.matchProfile = undefined; 
       await userA.save({ session });
 
       userB.coupleId = newCouple[0]._id;
@@ -157,12 +199,14 @@ exports.respondRequest = async (req, res, next) => {
       userB.matchProfile = undefined;
       await userB.save({ session });
 
-      // 4. Update Request
       request.status = 'Accepted';
       await request.save({ session });
     });
 
-    res.status(200).json({ success: true, message: req.body.action === 'Accepted' ? 'It\'s a Match! Couple Created.' : 'Request Rejected.' });
+    res.status(200).json({ 
+      success: true, 
+      message: req.body.action === 'Accepted' ? 'It\'s a Match! Couple Created.' : 'Request Rejected.' 
+    });
 
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

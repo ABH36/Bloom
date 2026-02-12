@@ -1,54 +1,44 @@
 const mongoose = require('mongoose');
 
 const coupleSchema = new mongoose.Schema({
-  users: {
-    type: [mongoose.Schema.Types.ObjectId],
+  users: [{
+    type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    validate: {
-      validator: function(val) {
-        return val.length === 2 && val[0].toString() !== val[1].toString();
-      },
-      message: 'A couple must consist of exactly 2 distinct users'
-    }
-  },
-  status: {
-    type: String,
-    enum: ['Active', 'Broken'],
-    default: 'Active'
-  },
-  startDate: {
-    type: Date,
-    default: Date.now
-  },
+    required: true
+  }],
+  // Phase 2 Fields
+  status: { type: String, enum: ['Active', 'Breakup', 'Archived'], default: 'Active' },
+  startDate: { type: Date, default: Date.now },
+  score: { type: Number, default: 50, min: 0, max: 100 },
   
-  // --- PHASE 3 FIELDS (Love Tree Engine) ---
-  score: {
-    type: Number,
-    default: 50,
-    min: 0,
-    max: 100
+  // Phase 3 Fields
+  streak: { type: Number, default: 0 },
+  lastInteraction: { type: Date, default: Date.now },
+  level: { type: Number, default: 1 },
+
+  // --- PHASE 9: CONFLICT RECOVERY MODE ---
+  recoveryMode: {
+    type: Boolean,
+    default: false,
+    index: true // Fast lookup for Insight Engine
   },
-  stage: {
-    type: String,
-    enum: ['Dry', 'Weak', 'Growing', 'Healthy', 'Bloom'],
-    default: 'Growing'
-  },
-  streak: {
-    type: Number,
-    default: 0
-  },
-  lastInteractionDate: {
+  recoveryStartedAt: {
     type: Date
+  },
+  recoveryLevel: {
+    type: String,
+    enum: ['Soft', 'Moderate', 'Critical'],
+    default: 'Soft'
   }
+
 }, {
   timestamps: true
 });
 
 // Indexes
-coupleSchema.index(
-  { users: 1, status: 1 }, 
-  { unique: true, partialFilterExpression: { status: 'Active' } }
-);
+coupleSchema.index({ users: 1 });
+coupleSchema.index({ status: 1 });
+// Phase 9 Performance Index
+coupleSchema.index({ recoveryMode: 1 }); 
 
 module.exports = mongoose.model('Couple', coupleSchema);
