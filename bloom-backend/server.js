@@ -1,38 +1,46 @@
 require('dotenv').config();
 const express = require('express');
-const connectDB = require('./config/db.js');
+const connectDB = require('./config/db');
 const helmet = require('helmet');
 const cors = require('cors');
 const xss = require('xss-clean');
 const mongoSanitize = require('express-mongo-sanitize');
-const rateLimit = require('express-rate-limit');
+
+// Import Routes
+const authRoutes = require('./routes/authRoutes');
 
 // Connect to Database
 connectDB();
 
 const app = express();
 
+// --- PRODUCTION PROXY SETTING ---
+// Essential for Rate Limiting behind Render/AWS/Nginx
+app.set('trust proxy', 1);
+
 // --- SECURITY MIDDLEWARE ---
-app.use(helmet()); // Secure Headers
-app.use(cors()); // Allow Cross-Origin requests
-app.use(express.json({ limit: '10kb' })); // Body parser (limit payload size)
-app.use(mongoSanitize()); // Prevent NoSQL Injection
-app.use(xss()); // Prevent XSS attacks
+app.use(helmet()); 
 
-// Rate Limiting (100 requests per 10 mins)
-const limiter = rateLimit({
-  windowMs: 10 * 60 * 1000, 
-  max: 100
-});
-app.use('/api', limiter);
+// Restricted CORS
+app.use(cors({
+  origin: process.env.CLIENT_URL, // Must be set in .env
+  credentials: true
+}));
 
-// --- ROUTES ---
-// app.use('/api/auth', require('./routes/authRoutes')); (We will add this next)
+app.use(express.json({ limit: '10kb' })); 
+app.use(mongoSanitize()); 
+app.use(xss()); 
 
-// --- ERROR HANDLING ---
+// --- MOUNT ROUTES ---
+app.use('/api/auth', authRoutes);
+
+// --- GLOBAL ERROR HANDLER ---
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ success: false, error: 'Server Error' });
+  res.status(500).json({
+    success: false, 
+    error: 'Server Error' 
+  });
 });
 
 const PORT = process.env.PORT || 5000;

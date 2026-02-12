@@ -1,17 +1,18 @@
 const nodemailer = require('nodemailer');
 
-// 1. Create Transporter (Singleton - Created only once)
+// 1. Create Transporter (Singleton with Timeouts)
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
-  secure: false, // true for 465, false for other ports
+  secure: false, // 587 uses STARTTLS
   auth: {
     user: process.env.SMTP_EMAIL,
     pass: process.env.SMTP_PASSWORD
   },
-  tls: {
-    rejectUnauthorized: false // Helps avoid self-signed cert errors in dev
-  }
+  // Hardening: Prevent hanging connections
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 10000,
+  socketTimeout: 10000
 });
 
 // 2. Verify Connection (Runs on server startup)
@@ -34,11 +35,11 @@ const sendEmail = async (options) => {
 
     const info = await transporter.sendMail(message);
     console.log('Email sent: %s', info.messageId);
-    return true; // Success signal
+    return true;
 
   } catch (error) {
     console.error('Email Send Failed:', error);
-    return false; // Failure signal
+    return false;
   }
 };
 
