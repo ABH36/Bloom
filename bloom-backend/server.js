@@ -9,6 +9,9 @@ const mongoSanitize = require('express-mongo-sanitize');
 const { initSocket } = require('./socket/socket');
 const validateEnv = require('./config/envValidator');
 const logger = require('./utils/logger');
+const notificationRoutes = require('./routes/notificationRoutes');
+const cron = require('node-cron');
+const { runInsightEngine } = require('./services/insightEngine');
 
 // --- 1. VALIDATE ENVIRONMENT (Fail Fast) ---
 validateEnv();
