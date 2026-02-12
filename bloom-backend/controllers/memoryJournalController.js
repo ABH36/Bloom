@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Memory = require('../models/Memory');
 const Journal = require('../models/Journal');
-const Couple = require('../models/Couple'); // Required for verification
+const Couple = require('../models/Couple');
 const User = require('../models/User');
 const { updateCoupleScore } = require('../utils/scoreEngine');
 
@@ -16,14 +16,12 @@ exports.addMemory = async (req, res, next) => {
     await session.withTransaction(async () => {
       const { imageUrl, publicId, note, date } = req.body;
 
-      // 1. Input Validation
       if (!imageUrl) {
         const error = new Error('Image URL is required for a memory');
         error.statusCode = 400;
         throw error;
       }
 
-      // 2. Fetch User INSIDE Session
       const user = await User.findById(req.user).session(session);
 
       if (!user) {
@@ -38,8 +36,7 @@ exports.addMemory = async (req, res, next) => {
         throw error;
       }
 
-      // 3. STRICT SECURITY: Verify Membership
-      // Ensure the user is actually a current member of the couple document
+      // STRICT SECURITY: Write-Side Verification
       const couple = await Couple.findById(user.coupleId).session(session);
       
       if (!couple) {
@@ -55,17 +52,15 @@ exports.addMemory = async (req, res, next) => {
         throw error;
       }
 
-      // 4. Create Memory
       await Memory.create([{
         coupleId: user.coupleId,
         uploadedBy: user._id,
         imageUrl,
-        publicId, // Optional Cloudinary ID
+        publicId,
         note,
         date: date || Date.now()
       }], { session });
 
-      // 5. Update Love Tree Score (+3 Points)
       await updateCoupleScore(user.coupleId, 3, session);
     });
 
@@ -90,12 +85,25 @@ exports.getMemories = async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Not in a relationship' });
     }
 
+    // STRICT SECURITY: Read-Side Verification
+    // Prevent stale token access to couple data
+    const couple = await Couple.findById(user.coupleId);
+    
+    if (!couple) {
+      return res.status(404).json({ success: false, error: 'Relationship data not found' });
+    }
+
+    const isMember = couple.users.some(id => id.equals(user._id));
+    if (!isMember) {
+      return res.status(403).json({ success: false, error: 'Unauthorized access' });
+    }
+
     const page = parseInt(req.query.page, 10) || 1;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50); // Clamp limit
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50);
     const skip = (page - 1) * limit;
 
     const memories = await Memory.find({ coupleId: user.coupleId })
-      .sort({ date: -1 }) // Newest first
+      .sort({ date: -1 })
       .skip(skip)
       .limit(limit)
       .populate('uploadedBy', 'name')
@@ -126,7 +134,7 @@ exports.addJournal = async (req, res, next) => {
     }
 
     const journal = await Journal.create({
-      userId: req.user, // Auth Middleware ID
+      userId: req.user,
       content,
       moodTag,
       date: date || Date.now()

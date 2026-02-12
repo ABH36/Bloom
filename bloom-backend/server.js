@@ -18,6 +18,9 @@ const authRoutes = require('./routes/authRoutes');
 const coupleRoutes = require('./routes/coupleRoutes');
 const interactionRoutes = require('./routes/interactionRoutes');
 const chatRoutes = require('./routes/chatRoutes');
+const memoryJournalRoutes = require('./routes/memoryJournalRoutes');
+const memoryRoutes = require('./routes/memoryRoutes');
+const journalRoutes = require('./routes/journalRoutes');
 
 // Connect to Database
 connectDB();
@@ -48,6 +51,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/couple', coupleRoutes);
 app.use('/api/love', interactionRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api', memoryJournalRoutes);
+app.use('/api/memory', memoryRoutes);
+app.use('/api/journal', journalRoutes);
 
 // --- HEALTH CHECK ENDPOINT (Step 5.1) ---
 // Used by Render/AWS Load Balancers to verify uptime
