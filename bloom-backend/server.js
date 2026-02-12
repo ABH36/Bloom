@@ -1,24 +1,30 @@
 require('dotenv').config();
 const express = require('express');
+const mongoose = require('mongoose'); // Needed for graceful shutdown
 const connectDB = require('./config/db');
 const helmet = require('helmet');
 const cors = require('cors');
 const xss = require('xss-clean');
 const mongoSanitize = require('express-mongo-sanitize');
-const { initSocket } = require('./socket/socket'); // Import Socket
+const { initSocket } = require('./socket/socket');
+const validateEnv = require('./config/envValidator');
+const logger = require('./utils/logger');
+
+// --- 1. VALIDATE ENVIRONMENT (Fail Fast) ---
+validateEnv();
 
 // Import Routes
 const authRoutes = require('./routes/authRoutes');
 const coupleRoutes = require('./routes/coupleRoutes');
 const interactionRoutes = require('./routes/interactionRoutes');
-const chatRoutes = require('./routes/chatRoutes'); // (Will be created in next step, placeholder)
+const chatRoutes = require('./routes/chatRoutes');
 
 // Connect to Database
 connectDB();
 
 const app = express();
 
-// --- PRODUCTION PROXY SETTING ---
+// --- PROXY SETTING (Critical for Rate Limiting) ---
 app.set('trust proxy', 1);
 
 // --- SECURITY MIDDLEWARE ---
@@ -31,27 +37,80 @@ app.use(express.json({ limit: '10kb' }));
 app.use(mongoSanitize()); 
 app.use(xss()); 
 
+// --- REQUEST LOGGER (Middleware) ---
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.originalUrl} - IP: ${req.ip}`);
+  next();
+});
+
 // --- MOUNT ROUTES ---
 app.use('/api/auth', authRoutes);
 app.use('/api/couple', coupleRoutes);
 app.use('/api/love', interactionRoutes);
-// app.use('/api/chat', require('./routes/chatRoutes')); // (Step 4.4)
+app.use('/api/chat', chatRoutes);
 
-// --- GLOBAL ERROR HANDLER ---
+// --- HEALTH CHECK ENDPOINT (Step 5.1) ---
+// Used by Render/AWS Load Balancers to verify uptime
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date(),
+    environment: process.env.NODE_ENV,
+    service: 'Bloom Backend'
+  });
+});
+
+// --- GLOBAL ERROR HANDLER (Step 5.5) ---
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
+  logger.error(err.message, err); // Log stack trace
+  
+  res.status(err.statusCode || 500).json({
     success: false, 
-    error: 'Server Error' 
+    error: err.message || 'Server Error' 
   });
 });
 
 const PORT = process.env.PORT || 5000;
 
-// Initialize Server & Socket
 const server = app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+  logger.info(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
 });
 
-// Start Socket.io
+// Initialize Socket.io
 initSocket(server);
+
+// --- GRACEFUL SHUTDOWN (Step 5.4) ---
+// Handles SIGTERM (Render/Heroku stop signal) and SIGINT (Ctrl+C)
+const gracefulShutdown = async (signal) => {
+  logger.warn(`Received ${signal}. Closing HTTP server and DB connection...`);
+  
+  server.close(async () => {
+    logger.info('HTTP server closed.');
+    
+    try {
+      await mongoose.connection.close(false);
+      logger.info('MongoDB connection closed.');
+      process.exit(0);
+    } catch (err) {
+      logger.error('Error closing MongoDB connection', err);
+      process.exit(1);
+    }
+  });
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle Uncaught Exceptions (Crash safety)
+process.on('uncaughtException', (err) => {
+  logger.error('UNCAUGHT EXCEPTION! Shutting down...', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  logger.error('UNHANDLED REJECTION! Shutting down...', err);
+  server.close(() => {
+    process.exit(1);
+  });
+});
